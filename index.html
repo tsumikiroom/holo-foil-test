@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Gold Foil — prototype v2</title>
+<title>Gold Foil — prototype v3</title>
 <style>
-  :root { --ink: #3a2a05; --chip: rgba(255,250,230,.82); color-scheme: light; }
-  html, body { margin: 0; height: 100%; background: #c9a227; overflow: hidden; touch-action: none; }
+  :root { --ink: #2b2006; --chip: rgba(255,250,235,.85); color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #3a2a08; overflow: hidden; touch-action: none; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   .ui {
     position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
@@ -27,51 +27,111 @@
 <canvas id="c"></canvas>
 <div class="ui">
   <button id="gyro" hidden>傾きで動かす</button>
-  <div class="status" id="status">マウスを動かすと反射が動く</div>
+  <div class="status" id="status">マウスを動かすとシートを傾けた扱いになる</div>
 </div>
 
 <script id="fs" type="x-shader/x-fragment">
 precision highp float;
+// 単位はメートル。シートの座標: x 右, y 上, z 画面の手前
 uniform vec2 uRes;
-uniform vec2 uTilt;   // -1〜1。面は動かさず、光の当たり方だけを変える
-uniform float uTile;  // マス目の大きさ（px）
+uniform float uScale;   // 1 画素あたりのメートル
+uniform float uTile;    // マスの大きさ（画素）
+uniform vec3 uLight;    // 電球の位置（シート座標）
+uniform vec3 uEye;      // 目の位置（シート座標）
+uniform mat3 uRot;      // シート座標 → 部屋の座標（景色を引くとき用）
 
-float hash(float n) { return fract(sin(n) * 43758.5453); }
+const float PI = 3.14159265;
+const vec3 F0 = vec3(1.0, 0.68, 0.10);   // 金色フォイルの正面反射率（線形。純金より黄色く）
+
+float h1(float n) { return fract(sin(n) * 43758.5453); }
+float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+// 手続きで作った部屋。d は部屋の座標の向き
+vec3 room(vec3 d) {
+  vec3 c = mix(vec3(.03, .028, .025), vec3(.14, .13, .11), smoothstep(-.5, .3, d.y));
+  c = mix(c, vec3(.55, .53, .50), smoothstep(.35, .9, d.y));
+  // 窓（右上・手前側）。十字の桟つき
+  vec3 wd = normalize(vec3(.55, .30, .78));
+  vec3 wu = normalize(cross(vec3(0., 1., 0.), wd));
+  vec3 wv = cross(wd, wu);
+  float u = dot(d, wu), v = dot(d, wv);
+  float inWin = step(0., dot(d, wd)) * (1. - smoothstep(.20, .23, abs(u))) * (1. - smoothstep(.27, .30, abs(v)));
+  float bars = smoothstep(.006, .012, abs(u)) * smoothstep(.006, .012, abs(v));
+  c = mix(c, vec3(2.0, 2.1, 2.3), inWin * bars);
+  // 天井の細長い照明（左上）
+  vec3 ld = normalize(vec3(-.35, .85, .40));
+  float k = dot(d, normalize(vec3(1., 0., -.2))) * 2.2;   // pow に負の数を入れない（スマホで NaN になる）
+  float along = exp(-k * k);
+  c += vec3(5., 4.2, 3.2) * smoothstep(.94, .97, dot(d, ld)) * along;
+  // 見ている人の頭（目の方向に暗い影）
+  float head = smoothstep(.10, .25, acos(clamp(d.z, -1., 1.)));
+  c *= mix(.12, 1., head);
+  return c;
+}
+
+vec3 aces(vec3 x) {
+  return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.);
+}
 
 void main() {
-  vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
-  vec2 g = p / uTile;
+  vec2 px = gl_FragCoord.xy - .5 * uRes;
+  vec3 P = vec3(px * uScale, 0.);
+
+  // マス目と、マスの中心まわりの同心円の筋（スピン加工）
+  vec2 g = gl_FragCoord.xy / uTile;
   vec2 cell = floor(g);
   vec2 l = fract(g) - .5;
-  float chk = mod(cell.x + cell.y, 2.);
+  float rl = max(length(l), 1e-4);
+  vec2 rd = l / rl;
+  float ring = floor(rl * uTile * .5);                  // 約 2 画素ごとの輪
+  float seed = h2(cell) * 100.;
+  float jit = (h1(ring + seed) - .5) * .04;             // 輪ごとの筋の向きの乱れ
+  vec2 t2 = vec2(-rd.y, rd.x);
+  t2 = vec2(t2.x * cos(jit) - t2.y * sin(jit), t2.x * sin(jit) + t2.y * cos(jit));
 
-  // マスの中心まわりに放射状のヘアライン → 反射は「中心を通る帯」になり、傾きで帯が回る
-  float th = atan(l.y, l.x);
-  float phi = -2.3 + uTilt.x * 1.7 - uTilt.y * 1.1;
-  float d = th - phi + chk * 1.5707963;   // 市松の隣どうしは 90° ずらす
-  float amt = clamp(length(uTilt), 0., 1.);
-  float spec = pow(abs(cos(d)), mix(2.8, 4.5, amt));
+  // 面の向き: マスごとの小さな傾き＋シート全体のゆるいうねり
+  vec2 tilt = (vec2(h2(cell), h2(cell + 7.3)) - .5) * .03;
+  vec2 wave = .018 * vec2(sin(P.x * 70. + sin(P.y * 45.)), sin(P.y * 60. + sin(P.x * 50.)));
+  vec3 N = normalize(vec3(tilt + wave, 1.));
+  vec3 T = normalize(vec3(t2, 0.) - N * dot(vec3(t2, 0.), N));
+  vec3 B = cross(N, T);
 
-  // 細かいヘアライン（角度ごとの細い濃淡）
-  float hair = hash(floor(th * 90.) + cell.x * 17. + cell.y * 131.) - .5;
-  spec = clamp(spec + hair * .06, 0., 1.);
+  vec3 V = normalize(uEye - P);
+  vec3 Lv = uLight - P;
+  float dist2 = dot(Lv, Lv);
+  vec3 L = Lv * inversesqrt(dist2);
+  vec3 H = normalize(L + V);
+  float NoL = max(dot(N, L), 0.), NoV = max(dot(N, V), 1e-3), NoH = dot(N, H), VoH = max(dot(V, H), 0.);
 
-  // 面全体の光のむら：光が来る側は明るい黄、遠い側はオレンジに沈む
-  vec2 uv = (p - .5 * uRes) / uRes.y;
-  vec2 ld = vec2(cos(phi), sin(phi));
-  float glob = dot(uv, ld) + uTilt.y * .25;
-  float warm = 1. - smoothstep(-.75, .15, glob);
-  float band = exp(-pow((glob - .1 + uTilt.x * .3) * 2.6, 2.));
+  // 異方性 GGX: 筋に沿う向きはなめらか（at 小）、筋を横切る向きは粗い（ab 大）
+  float at = .10, ab = .55;
+  float a2 = at * ab;
+  vec3 dd = vec3(ab * dot(T, H), at * dot(B, H), a2 * NoH);
+  float w2 = a2 / dot(dd, dd);
+  float D = a2 * w2 * w2 / PI;
+  float lv = NoL * length(vec3(at * dot(T, V), ab * dot(B, V), NoV));
+  float ll = NoV * length(vec3(at * dot(T, L), ab * dot(B, L), NoL));
+  float Vis = .5 / (lv + ll + 1e-5);
+  vec3 F = F0 + (1. - F0) * pow(1. - VoH, 5.);
+  vec3 spec = D * Vis * F * NoL * vec3(1., .93, .82) * (.9 / dist2);
 
-  vec3 dark = vec3(.66, .46, .04);
-  vec3 mid  = vec3(.96, .80, .10);
-  vec3 hi   = vec3(1.0, .98, .78);
-  vec3 col = mix(dark, mid, smoothstep(.0, .55, spec));
-  col = mix(col, hi, smoothstep(.62, 1., spec));
-  col = mix(col, col * vec3(1.05, .58, .22) + vec3(.06, .0, .0), warm * .55);
-  col += band * vec3(.10, .08, .03);
+  // 部屋の映り込み: 反射の向きを筋を横切る方向に広げて何本か平均（引き伸ばしたぼかし）
+  vec3 R = reflect(-V, N);
+  vec3 acc = vec3(0.);
+  float wsum = 0.;
+  for (int i = 0; i < 11; i++) {
+    float s = float(i) / 10. * 2. - 1.;
+    float wgt = exp(-s * s * 2.5);
+    vec3 Ri = normalize(R + B * s * ab * 1.3);
+    acc += room(uRot * Ri) * wgt;
+    wsum += wgt;
+  }
+  vec3 Fe = F0 + (1. - F0) * pow(1. - NoV, 5.);
+  vec3 col = spec + acc / wsum * Fe;
 
-  gl_FragColor = vec4(col, 1.);
+  col *= 1. + (h1(ring * 3.1 + seed) - .5) * .10;      // 輪ごとのわずかな明暗
+  col = aces(col * 1.1);
+  gl_FragColor = vec4(pow(col, vec3(1. / 2.2)), 1.);
 }
 </script>
 <script>
@@ -79,79 +139,105 @@ const canvas = document.getElementById('c');
 const statusEl = document.getElementById('status');
 const gl = canvas.getContext('webgl');
 
-const vsSrc = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0., 1.); }';
 function shader(type, src) {
   const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
   return s;
 }
 const prog = gl.createProgram();
-gl.attachShader(prog, shader(gl.VERTEX_SHADER, vsSrc));
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0., 1.); }'));
 gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
 gl.linkProgram(prog); gl.useProgram(prog);
 gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 const aLoc = gl.getAttribLocation(prog, 'a');
 gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
-const uRes = gl.getUniformLocation(prog, 'uRes');
-const uTilt = gl.getUniformLocation(prog, 'uTilt');
-const uTile = gl.getUniformLocation(prog, 'uTile');
+const U = n => gl.getUniformLocation(prog, n);
+const uRes = U('uRes'), uScale = U('uScale'), uTile = U('uTile'), uLight = U('uLight'), uEye = U('uEye'), uRot = U('uRot');
 
 let dpr = 1;
 function resize() {
-  dpr = Math.min(2, window.devicePixelRatio || 1);
+  dpr = Math.min(1.5, window.devicePixelRatio || 1);
   canvas.width = Math.round(innerWidth * dpr);
   canvas.height = Math.round(innerHeight * dpr);
   gl.viewport(0, 0, canvas.width, canvas.height);
 }
 addEventListener('resize', resize); resize();
 
-// 目標の傾き → バネで追いかける（少し遅れて反射が流れる）
-const target = { x: 0, y: 0 }, cur = { x: 0, y: 0 }, vel = { x: 0, y: 0 };
-const STIFF = .07, DAMP = .75;
-const clamp1 = v => Math.max(-1, Math.min(1, v));
+// 回転は四元数 [x, y, z, w]。部屋（電球・窓・目）は固定で、シートの方が回る
+const qAxis = (x, y, z, a) => { const s = Math.sin(a / 2); return [x * s, y * s, z * s, Math.cos(a / 2)]; };
+const qMul = (a, b) => [
+  a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+  a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+  a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+  a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+const qConj = q => [-q[0], -q[1], -q[2], q[3]];
+const qNorm = q => { const n = Math.hypot(...q); return q.map(v => v / n); };
+// 行優先の 3x3（シート → 部屋）
+function qMat(q) {
+  const [x, y, z, w] = q;
+  return [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+          2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+          2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)];
+}
+const mulT = (m, v) => [  // 転置 × v（部屋 → シート）
+  m[0] * v[0] + m[3] * v[1] + m[6] * v[2],
+  m[1] * v[0] + m[4] * v[1] + m[7] * v[2],
+  m[2] * v[0] + m[5] * v[1] + m[8] * v[2]];
+
+const LIGHT = [-0.18, 0.40, 0.55];   // 部屋の電球: 左上の手前 約 70cm
+const EYE = [0, 0, 0.35];            // 目: 画面の正面 35cm
+
+let target = [0, 0, 0, 1], cur = [0, 0, 0, 1];
 
 function frame() {
-  for (const k of ['x', 'y']) {
-    vel[k] = (vel[k] + (target[k] - cur[k]) * STIFF) * DAMP;
-    cur[k] += vel[k];
-  }
+  if (target[0] * cur[0] + target[1] * cur[1] + target[2] * cur[2] + target[3] * cur[3] < 0) target = target.map(v => -v);
+  cur = qNorm(cur.map((v, i) => v + (target[i] - v) * .12));   // 少し遅れて追従
+  const m = qMat(cur);
   gl.uniform2f(uRes, canvas.width, canvas.height);
-  gl.uniform2f(uTilt, cur.x, cur.y);
-  // マス目は画面の短い辺の約 1/4.5（80〜140px）
+  gl.uniform1f(uScale, 0.0002 / dpr);   // 1 CSS px = 0.2mm（スマホ幅で約 8cm）
   gl.uniform1f(uTile, Math.round(Math.max(80, Math.min(140, Math.min(innerWidth, innerHeight) / 4.5))) * dpr);
+  gl.uniform3fv(uLight, mulT(m, LIGHT));
+  gl.uniform3fv(uEye, mulT(m, EYE));
+  // WebGL は列優先なので転置して渡す
+  gl.uniformMatrix3fv(uRot, false, [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
-// マウス / 指: 画面中央からのずれを傾きとして扱う
+// マウス / 指: 画面中央からのずれを、シートを最大 ±20° 傾けたことにする
+const MAX = 20 * Math.PI / 180;
 addEventListener('pointermove', e => {
   if (gyroOn) return;
-  target.x = clamp1((e.clientX / innerWidth - .5) * 2);
-  target.y = clamp1((e.clientY / innerHeight - .5) * 2);
+  const rx = (e.clientY / innerHeight - .5) * 2 * MAX;
+  const ry = (e.clientX / innerWidth - .5) * 2 * MAX;
+  target = qMul(qAxis(1, 0, 0, rx), qAxis(0, 1, 0, ry));
 });
-document.documentElement.addEventListener('pointerleave', () => {
-  if (!gyroOn) { target.x = 0; target.y = 0; }
-});
+document.documentElement.addEventListener('pointerleave', () => { if (!gyroOn) target = [0, 0, 0, 1]; });
 
 // 傾きセンサー（HTTPS のページでだけ動く）
 let gyroOn = false, base = null;
 const gyroBtn = document.getElementById('gyro');
-if ('DeviceOrientationEvent' in window && matchMedia('(pointer: coarse)').matches) gyroBtn.hidden = false;
+if ('DeviceOrientationEvent' in window && matchMedia('(pointer: coarse)').matches) {
+  gyroBtn.hidden = false;
+  statusEl.textContent = '指でなぞるか、「傾きで動かす」を押す';
+}
 if (!window.isSecureContext) statusEl.textContent += '（http なので傾きセンサーは使えません）';
 
 function onOrient(e) {
   if (e.beta == null) return;
-  if (!base) base = { b: e.beta, g: e.gamma };   // ボタンを押したときの持ち方を正面にする
-  target.x = clamp1((e.gamma - base.g) / 25);
-  target.y = clamp1((e.beta - base.b) / 25);
+  const r = Math.PI / 180;
+  // 仕様どおり Z(alpha) → X(beta) → Y(gamma) の順の回転
+  const q = qMul(qMul(qAxis(0, 0, 1, (e.alpha || 0) * r), qAxis(1, 0, 0, e.beta * r)), qAxis(0, 1, 0, e.gamma * r));
+  if (!base) base = q;                       // ボタンを押したときの持ち方を基準にする
+  target = qMul(qConj(base), q);
 }
 
 gyroBtn.addEventListener('click', async () => {
   if (gyroOn) {
     removeEventListener('deviceorientation', onOrient);
-    gyroOn = false; base = null; target.x = 0; target.y = 0;
+    gyroOn = false; base = null; target = [0, 0, 0, 1];
     gyroBtn.textContent = '傾きで動かす'; statusEl.textContent = '傾きセンサー: オフ';
     return;
   }
@@ -164,7 +250,7 @@ gyroBtn.addEventListener('click', async () => {
     addEventListener('deviceorientation', onOrient);
     gyroOn = true; base = null;
     gyroBtn.textContent = '傾きを止める';
-    statusEl.textContent = '傾きセンサー: オン';
+    statusEl.textContent = '傾きセンサー: オン（押したときの持ち方が基準）';
     setTimeout(() => {
       if (gyroOn && !base) statusEl.textContent = '傾きセンサーの値が届きません（このページでは止められています）';
     }, 2000);
