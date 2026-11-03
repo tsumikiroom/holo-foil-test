@@ -25,6 +25,7 @@
   .tune label { display: flex; align-items: center; gap: 6px; }
   .tune input { width: 110px; }
   .tune output { font-variant-numeric: tabular-nums; min-width: 2.6em; }
+  .starts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
   .ui .tune button { padding: 6px 12px; background: rgba(43,32,6,.12); }
   .ui .tune button[aria-pressed="true"] { background: var(--ink); color: #fff6dc; }
   .ui .tune button:disabled { opacity: .45; cursor: default; }
@@ -40,13 +41,17 @@
 <canvas id="c"></canvas>
 <button class="toggle" id="toggle" aria-expanded="false">調整</button>
 <div class="ui">
-  <button id="start">インカメラと傾きで動かす</button>
+  <div class="starts" id="starts">
+    <button id="start">インカメラと傾きで動かす</button>
+    <button id="startNoCam">カメラなし（傾きだけ）</button>
+  </div>
   <div class="tune" id="tune" hidden>
     <label>明るさ <input id="gain" type="range" min="0.2" max="2" step="0.05" value="0.6"> <output id="gainV">0.60</output></label>
     <label>コントラスト <input id="contrast" type="range" min="1" max="4" step="0.1" value="3"> <output id="contrastV">3.0</output></label>
     <button id="lock" type="button" aria-pressed="false" disabled>カメラの明るさを固定</button>
+    <button id="camMode" type="button" hidden>カメラなしにする</button>
   </div>
-  <div class="status" id="status">ボタンを押すと、インカメラの映像が金のシートに映り込む</div>
+  <div class="status" id="status">インカメラの映像を映り込みに使うか、作り物の部屋（カメラなし）で動かすかを選ぶ</div>
   <!-- iOS は非表示の video だと更新が止まることがあるので、1px でほぼ透明にして置く -->
   <video id="v" playsinline muted style="position:fixed;top:0;left:0;width:1px;height:1px;opacity:.01;pointer-events:none"></video>
 </div>
@@ -301,10 +306,8 @@ function onOrient(e) {
   target = qMul(qConj(base), q);
 }
 
-startBtn.addEventListener('click', async () => {
-  startBtn.disabled = true;
-  const notes = [];
-  // 1. 傾き（iOS はタップの中で最初に許可を求める必要がある）
+// 1. 傾き（iOS はタップの中で最初に許可を求める必要がある）
+async function startGyro(notes) {
   try {
     let ok = true;
     if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -316,7 +319,9 @@ startBtn.addEventListener('click', async () => {
       base = null;
     } else if (!ok) notes.push('傾きは許可されませんでした');
   } catch (err) { notes.push('傾きを開始できません'); }
-  // 2. インカメラ
+}
+// 2. インカメラ
+async function startCam(notes) {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 } }, audio: false });
     video.srcObject = stream;
@@ -324,20 +329,57 @@ startBtn.addEventListener('click', async () => {
     camOn = true;
     camTrack = stream.getVideoTracks()[0];
     lockBtn.disabled = false;
-  } catch (err) { notes.push('カメラを使えません（' + err.name + '）'); }
-  statusEl.textContent = notes.length ? notes.join('／') :
-    'インカメラ＋傾き: オン（映像はこの端末の中だけで使い、送信も保存もしない）';
-  if (camOn) startBtn.hidden = true; else startBtn.disabled = false;
+  } catch (err) { stopCam(); notes.push('カメラを使えません（' + err.name + '）'); }
+}
+// カメラなしに切り替えるときは映像を止めてカメラを手放す（作り物の部屋と電球に戻る）
+function stopCam() {
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+  camOn = false; camTrack = null; locked = false;
+  lockBtn.disabled = true; lockBtn.setAttribute('aria-pressed', false); lockBtn.textContent = 'カメラの明るさを固定';
+}
+function updateCamMode() {
+  camModeBtn.hidden = false;
+  camModeBtn.textContent = camOn ? 'カメラなしにする' : 'インカメラを使う';
+}
+
+const camText = 'インカメラ＋傾き: オン（映像はこの端末の中だけで使い、送信も保存もしない）';
+const noCamText = 'カメラなし＋傾き: オン（作り物の部屋と電球が映り込む）';
+async function start(useCam) {
+  startBtn.disabled = noCamBtn.disabled = true;
+  const notes = [];
+  await startGyro(notes);
+  if (useCam) await startCam(notes);
+  statusEl.textContent = notes.length ? notes.join('／') : (useCam ? camText : noCamText);
   hasProblem = notes.length > 0;
+  if (useCam && !camOn) { startBtn.disabled = noCamBtn.disabled = false; removeEventListener('deviceorientation', onOrient); gyroOn = false; }
+  else { startsEl.hidden = true; started = true; updateCamMode(); }
   setTimeout(() => {
     if (gyroOn && !base) { statusEl.textContent += '／傾きの値が届きません'; hasProblem = true; }
     if (canHideStatus()) statusEl.hidden = true;   // うまく動いていれば表示を消して画面をシートだけにする
   }, 3000);
+}
+const noCamBtn = document.getElementById('startNoCam'), startsEl = document.getElementById('starts');
+let started = false;
+startBtn.addEventListener('click', () => start(true));
+noCamBtn.addEventListener('click', () => start(false));
+
+// 始めた後の切り替え（「調整」の中）
+const camModeBtn = document.getElementById('camMode');
+camModeBtn.addEventListener('click', async () => {
+  camModeBtn.disabled = true;
+  const notes = [];
+  if (camOn) stopCam(); else await startCam(notes);
+  statusEl.textContent = notes.length ? notes.join('／') : (camOn ? camText : noCamText);
+  hasProblem = notes.length > 0;
+  statusEl.hidden = false;
+  updateCamMode();
+  camModeBtn.disabled = false;
 });
 
 // 状態の表示を隠してよいのは、カメラが動いていて、問題がなく、つまみも閉じているときだけ
 let hasProblem = false;
-const canHideStatus = () => camOn && !hasProblem && document.getElementById('tune').hidden;
+const canHideStatus = () => started && !hasProblem && document.getElementById('tune').hidden;
 
 // カメラの自動の明るさ調整（露出・ホワイトバランス）を止めて、押した時点の値で固定する。
 // Android の Chrome は対応。iPhone の Safari はおそらく非対応で、そのときは理由を表示する
