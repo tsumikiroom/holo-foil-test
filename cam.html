@@ -25,6 +25,9 @@
   .tune label { display: flex; align-items: center; gap: 6px; }
   .tune input { width: 110px; }
   .tune output { font-variant-numeric: tabular-nums; min-width: 2.6em; }
+  .ui .tune button { padding: 6px 12px; background: rgba(43,32,6,.12); }
+  .ui .tune button[aria-pressed="true"] { background: var(--ink); color: #fff6dc; }
+  .ui .tune button:disabled { opacity: .45; cursor: default; }
   .status { background: var(--chip); border-radius: 999px; padding: 4px 12px; text-align: center; }
   .toggle {
     position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px));
@@ -41,6 +44,7 @@
   <div class="tune" id="tune" hidden>
     <label>明るさ <input id="gain" type="range" min="0.2" max="2" step="0.05" value="0.6"> <output id="gainV">0.60</output></label>
     <label>コントラスト <input id="contrast" type="range" min="1" max="4" step="0.1" value="3"> <output id="contrastV">3.0</output></label>
+    <button id="lock" type="button" aria-pressed="false" disabled>カメラの明るさを固定</button>
   </div>
   <div class="status" id="status">ボタンを押すと、インカメラの映像が金のシートに映り込む</div>
   <!-- iOS は非表示の video だと更新が止まることがあるので、1px でほぼ透明にして置く -->
@@ -318,6 +322,8 @@ startBtn.addEventListener('click', async () => {
     video.srcObject = stream;
     await video.play();
     camOn = true;
+    camTrack = stream.getVideoTracks()[0];
+    lockBtn.disabled = false;
   } catch (err) { notes.push('カメラを使えません（' + err.name + '）'); }
   statusEl.textContent = notes.length ? notes.join('／') :
     'インカメラ＋傾き: オン（映像はこの端末の中だけで使い、送信も保存もしない）';
@@ -332,6 +338,63 @@ startBtn.addEventListener('click', async () => {
 // 状態の表示を隠してよいのは、カメラが動いていて、問題がなく、つまみも閉じているときだけ
 let hasProblem = false;
 const canHideStatus = () => camOn && !hasProblem && document.getElementById('tune').hidden;
+
+// カメラの自動の明るさ調整（露出・ホワイトバランス）を止めて、押した時点の値で固定する。
+// Android の Chrome は対応。iPhone の Safari はおそらく非対応で、そのときは理由を表示する
+let camTrack = null, locked = false;
+const lockBtn = document.getElementById('lock');
+function camSettingsText() {
+  const s = camTrack.getSettings();
+  return s.exposureTime != null ? '（露出時間 ' + s.exposureTime + '）' : '';
+}
+lockBtn.addEventListener('click', async () => {
+  if (!camTrack) return;
+  const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+  const modes = caps.exposureMode || [];
+  lockBtn.disabled = true;
+  try {
+    if (!locked) {
+      const before = camTrack.getSettings();
+      if (modes.includes('manual')) {
+        // 先に manual にしてから、固定する前の露出時間・感度を入れ直す（端末によって 2 回に分ける必要がある）
+        await camTrack.applyConstraints({ advanced: [{ exposureMode: 'manual' }] });
+        const keep = {};
+        if (before.exposureTime != null && caps.exposureTime) keep.exposureTime = before.exposureTime;
+        if (before.iso != null && caps.iso) keep.iso = before.iso;
+        if (Object.keys(keep).length) await camTrack.applyConstraints({ advanced: [keep] });
+      } else if (modes.includes('single-shot')) {
+        await camTrack.applyConstraints({ advanced: [{ exposureMode: 'single-shot' }] });   // 1 回測ってそのまま保つ
+      } else {
+        throw new Error('この端末のカメラは明るさの固定に対応していません');
+      }
+      locked = true;   // 露出を変えた時点で「固定中」扱い（解除で自動に戻せるように）
+      // Chrome は効かない条件を黙って無視するので、実際に切り替わったかを確かめる
+      const mode = camTrack.getSettings().exposureMode;
+      if (mode && mode !== 'manual' && mode !== 'single-shot') throw new Error('カメラが固定を受け付けませんでした（いまの方式: ' + mode + '）');
+      let wbNote = '';
+      if ((caps.whiteBalanceMode || []).includes('manual')) {
+        try {
+          const wb = { whiteBalanceMode: 'manual' };
+          if (before.colorTemperature != null) wb.colorTemperature = before.colorTemperature;
+          await camTrack.applyConstraints({ advanced: [wb] });
+        } catch (e) { wbNote = '（色味は自動のまま）'; }
+      }
+      statusEl.textContent = 'カメラの明るさを固定しました' + camSettingsText() + wbNote;
+    } else {
+      const auto = { exposureMode: 'continuous' };
+      if ((caps.whiteBalanceMode || []).includes('continuous')) auto.whiteBalanceMode = 'continuous';
+      await camTrack.applyConstraints({ advanced: [auto] });
+      locked = false;
+      statusEl.textContent = 'カメラの明るさ: 自動に戻しました';
+    }
+  } catch (err) {
+    statusEl.textContent = '固定できません: ' + err.message + '（対応している露出の方式: ' + (modes.join(', ') || 'なし') + '）';
+  }
+  lockBtn.setAttribute('aria-pressed', locked);
+  lockBtn.textContent = locked ? '固定を解除' : 'カメラの明るさを固定';
+  lockBtn.disabled = false;
+  statusEl.hidden = false;
+});
 
 // 「調整」でつまみの出し入れ（出すときは状態の表示も一緒に出す）
 const toggleBtn = document.getElementById('toggle'), tuneEl = document.getElementById('tune');
