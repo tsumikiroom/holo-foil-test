@@ -20,6 +20,10 @@
     background: var(--chip); color: var(--ink); border: 0; border-radius: 999px;
     padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer;
   }
+  .tune { display: flex; flex-wrap: wrap; gap: 6px 14px; justify-content: center; background: var(--chip); border-radius: 14px; padding: 6px 12px; }
+  .tune label { display: flex; align-items: center; gap: 6px; }
+  .tune input { width: 110px; }
+  .tune output { font-variant-numeric: tabular-nums; min-width: 2.6em; }
   .status { background: var(--chip); border-radius: 999px; padding: 4px 12px; text-align: center; }
 </style>
 </head>
@@ -27,6 +31,10 @@
 <canvas id="c"></canvas>
 <div class="ui">
   <button id="start">インカメラと傾きで動かす</button>
+  <div class="tune">
+    <label>明るさ <input id="gain" type="range" min="0.2" max="2" step="0.05" value="0.6"> <output id="gainV">0.60</output></label>
+    <label>コントラスト <input id="contrast" type="range" min="1" max="4" step="0.1" value="3"> <output id="contrastV">3.0</output></label>
+  </div>
   <div class="status" id="status">ボタンを押すと、インカメラの映像が金のシートに映り込む</div>
   <!-- iOS は非表示の video だと更新が止まることがあるので、1px でほぼ透明にして置く -->
   <video id="v" playsinline muted style="position:fixed;top:0;left:0;width:1px;height:1px;opacity:.01;pointer-events:none"></video>
@@ -44,6 +52,8 @@ uniform mat3 uRot;      // シート座標 → 部屋の座標（景色を引く
 uniform sampler2D uCam; // インカメラの映像
 uniform float uUseCam;  // 1 ならカメラ映像、0 なら作り物の部屋
 uniform vec2 uCamTan;   // カメラの画角（半分の tan）横・縦
+uniform float uGain;    // 映り込みの明るさ
+uniform float uContrast;
 
 const float PI = 3.14159265;
 const vec3 F0 = vec3(1.0, 0.68, 0.10);   // 金色フォイルの正面反射率（線形。純金より黄色く）
@@ -81,10 +91,10 @@ vec3 cam(vec3 r) {
   vec2 uv = vec2(.5 - r.x / z / (2. * uCamTan.x), .5 - r.y / z / (2. * uCamTan.y));
   float inside = min(min(uv.x, 1. - uv.x), min(uv.y, 1. - uv.y));
   vec3 c = texture2D(uCam, clamp(uv, .002, .998)).rgb;
-  c = c * c;                                            // おおよそ線形に戻す
+  c = pow(c, vec3(uContrast));                          // 線形に戻しつつ中間を沈める（大きいほど強いコントラスト）
   float lum = dot(c, vec3(.3, .59, .11));
-  c *= 1. + 3. * smoothstep(.5, .95, lum);              // 白飛びした所（照明・窓）は本当はもっと明るい
-  return c * 1.6 * mix(.4, 1., smoothstep(-.1, .1, inside));   // 画角の外は端の色を暗めに延ばす
+  c *= 1. + 2.5 * smoothstep(.3, .8, lum);              // 白飛びした所（照明・窓）だけ持ち上げる
+  return c * uGain * mix(.3, 1., smoothstep(-.1, .1, inside));   // 画角の外は端の色を暗めに延ばす
 }
 
 vec3 aces(vec3 x) {
@@ -172,7 +182,11 @@ const aLoc = gl.getAttribLocation(prog, 'a');
 gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
 const U = n => gl.getUniformLocation(prog, n);
 const uRes = U('uRes'), uScale = U('uScale'), uTile = U('uTile'), uLight = U('uLight'), uEye = U('uEye'), uRot = U('uRot');
-const uUseCam = U('uUseCam'), uCamTan = U('uCamTan');
+const uUseCam = U('uUseCam'), uCamTan = U('uCamTan'), uGain = U('uGain'), uContrast = U('uContrast');
+// 明るさ・コントラストのつまみ（数値を見せて、感想と一緒に伝えてもらう）
+const gainEl = document.getElementById('gain'), contrastEl = document.getElementById('contrast');
+gainEl.addEventListener('input', () => { document.getElementById('gainV').textContent = (+gainEl.value).toFixed(2); });
+contrastEl.addEventListener('input', () => { document.getElementById('contrastV').textContent = (+contrastEl.value).toFixed(1); });
 
 // カメラ映像のテクスチャ（2 のべき乗でない大きさなので端は伸ばし、縮小はなめらかに）
 const video = document.getElementById('v');
@@ -245,6 +259,8 @@ function frame() {
     gl.uniform2f(uCamTan, 0.7 * w / long, 0.7 * h / long);
   }
   gl.uniform1f(uUseCam, camOn ? 1 : 0);
+  gl.uniform1f(uGain, +gainEl.value);
+  gl.uniform1f(uContrast, +contrastEl.value);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
 }
