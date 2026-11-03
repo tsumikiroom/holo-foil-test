@@ -322,18 +322,23 @@ startBtn.addEventListener('click', async () => {
   statusEl.textContent = notes.length ? notes.join('／') :
     'インカメラ＋傾き: オン（映像はこの端末の中だけで使い、送信も保存もしない）';
   if (camOn) startBtn.hidden = true; else startBtn.disabled = false;
+  hasProblem = notes.length > 0;
   setTimeout(() => {
-    if (gyroOn && !base) statusEl.textContent += '／傾きの値が届きません';
-    else if (camOn && !notes.length) statusEl.hidden = true;   // うまく動いていれば表示を消して画面をシートだけにする
+    if (gyroOn && !base) { statusEl.textContent += '／傾きの値が届きません'; hasProblem = true; }
+    if (canHideStatus()) statusEl.hidden = true;   // うまく動いていれば表示を消して画面をシートだけにする
   }, 3000);
 });
+
+// 状態の表示を隠してよいのは、カメラが動いていて、問題がなく、つまみも閉じているときだけ
+let hasProblem = false;
+const canHideStatus = () => camOn && !hasProblem && document.getElementById('tune').hidden;
 
 // 「調整」でつまみの出し入れ（出すときは状態の表示も一緒に出す）
 const toggleBtn = document.getElementById('toggle'), tuneEl = document.getElementById('tune');
 toggleBtn.addEventListener('click', () => {
   const show = tuneEl.hidden;
   tuneEl.hidden = !show;
-  if (show) statusEl.hidden = false; else if (camOn) statusEl.hidden = true;
+  statusEl.hidden = canHideStatus();
   toggleBtn.setAttribute('aria-expanded', show);
   toggleBtn.textContent = show ? '閉じる' : '調整';
 });
